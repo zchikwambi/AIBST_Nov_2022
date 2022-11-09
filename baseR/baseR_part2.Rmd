@@ -72,5 +72,6 @@ for (i in n){
 }
 square<-function(n) {n^2}
 lapply(n, square)
+sapply(n, square)
 
 ```

@@ -1,0 +1,76 @@
+---
+title: "baseR_part2.Rmd"
+author: "Zedias Chikwambi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r}
+a<-readRDS("my_day2matrix.rds")
+a
+```
+#data loaded
+```{r}
+rowSums(a, na.rm = TRUE)
+rowMeans(a, na.rm = TRUE)
+colMeans(a, na.rm = TRUE)
+a2<-cbind(a,
+          rowSums=rowSums(a), 
+          rowMeans=rowMeans(a))
+a2
+```
+#Adding rowSums and rowMeans
+
+```{r}
+#Adding colSums and colMeans
+a_c<-rbind(a2,
+           colSums=colSums(a), NA, NA,
+           colMeans=colMeans(a), NA, NA)
+a_c
+```
+#Loading Data=Toothgrowth
+```{r}
+data("ToothGrowth")
+head(ToothGrowth)
+```
+#Structure of the data
+```{r}
+str(ToothGrowth)
+print(paste("Minimum tooth length: ", min(ToothGrowth$len)))
+print(paste("Maximum tooth length: ", max(ToothGrowth$len)))
+print(paste("Mean tooth length: ", mean(ToothGrowth$len)))
+
+#mean(ToothGrowth$len) echo "Mean"
+#min(ToothGrowth$len)
+#max(ToothGrowth$len)
+```
+# Calculating the hypotenuse to a single input
+```{r}
+#formulae:
+#hypo=√(a² + b²)
+#Where a and b are the lengths of the two sides of the triangle
+
+hy<-function(a, b) {
+  hypo<-sqrt(a**2 + b**2)
+  return(hypo)
+}
+hy(3, 5)
+```
+# Apply function to a matrix
+
+```{r}
+#Create a numeric vector of length 10. Write an lapplyand sapplystatement to square each element. Compare the two outputs.
+n<-c(1:10)
+
+for (i in n){
+  print(n^2)
+}
+square<-function(n) {n^2}
+lapply(n, square)
+
+```

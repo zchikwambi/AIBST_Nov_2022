@@ -391,25 +391,52 @@ dds_filtered_updated
 
 # So we have the actual steps that we've gone through to get to DE in one place generate the dds object again and use the DESeq() function to perform steps 1-3 in one go
 
+
+#####################RECAP#################
+
 ```{r}
 # generate dds object 
-
+dds_final<-DESeqDataSetFromMatrix(
+  countData=counts_table,
+  colData=sample_info,
+  design=~replicate + cell_type,
+  tidy = FALSE,
+  ignoreRank = FALSE
+) 
+dds_final
+```
 # filter rows with 0 counts 
+```{r}
+dds_final_filtered<-dds[rowSums(assays(dds_final)$count) >0, ]
+dds_final_filtered
+```
 
 # remove unwanted samples 
+```{r}
+dds_final_filtered_subset <- dds_final_filtered[,1:6]
+```
 
 # make DESeqDataSet (dds) object 
 
 # run DESeq() 
-
+```{r}
+dds_final_filtered_DE<-DESeq(dds_final_filtered)
 ```
 
 # Get the results from your dds object - call it `results_obj`
+```{r}
+dds_final_filtered_DE
+```
+
 
 ```{r}
 # What do the results() and summary() do, what arguments can you specify? 
+res<-results(dds_final_filtered_DE, alpha = 0.05)
+res
+```
 
-
+```{r}
+summary(res)
 ```
 
 # Optional - if we have time: Access the coefficients of the Negative Binomnial GLM – see vingette("DESeq2")
@@ -423,15 +450,32 @@ dds_filtered_updated
  
 ```{r}
 # Plot normalised counts for gene ENSMUSG00000041779
-
+plotCounts(dds_final_filtered_subset,
+           gene = "ENSMUSG00000041779", intgroup = "cell_type")
 ```
 
-# Access the results table for the comparison between CD8 and CD4 T cells . Youu can also try to CD4 vs CD8 (i.e. switch the reference) - you could also try this for replicate 1 vs replicate 3 as a control 
-
-checkout `resultsNames()`  & `results()`
+```{r}
+# Plot normalised counts for gene ENSMUSG00000041779
+plotCounts(dds_final_filtered_subset,
+           gene = "ENSMUSG00000041779", returnData = T, intgroup = "cell_type")
+```
 
 ```{r}
+# Access the results table for the comparison between CD8 and CD4 T cells . Youu can also try to CD4 vs CD8 (i.e. switch the reference) - you could also try this for replicate 1 vs replicate 3 as a control 
 
+#checkout `resultsNames()`  & `results()`
+res_contrast<-results(dds_final_filtered_DE, alpha = 0.05,contrast = c("cell_type", "CD8","CD4"))
+res_contrast
+```
+```{r}
+res_contrast_rev<-results(dds_final_filtered_DE, alpha = 0.05,contrast = c("cell_type", "CD4","CD8"))
+res_contrast_rev
+```
+```{r}
+#Compare(res_contrast$pvalue, res_contrast$padj)
+#, summary(res_contrast_rev), fun = "==")
+  
+print(summary(res_contrast), summary(res_contrast_rev))
 ```
 
 Table should contain log2 fold changes and p-values for all genes
@@ -439,7 +483,11 @@ Table should contain log2 fold changes and p-values for all genes
 # Plot a histogram of the raw and BH-adjusted p-values using ggplot – do they look as expected? for CD8 vs CD4
 
 ```{r}
-
+res%>%
+    as.data.frame() %>% 
+    ggplot() +
+    geom_histogram(aes(x=pvalue), fill='lightblue') + 
+    geom_histogram(aes(x=padj),fill='lightgreen')
 ```
 
 
@@ -447,12 +495,30 @@ Table should contain log2 fold changes and p-values for all genes
 
 ```{r}
 
-
+plotMA(res, alpha = 0.05)
 ```
 
 # Shrink the log2 FC values using the normal, apeglm and ashr methods -> see the vignette – which shall we choose? 
 
 ```{r}
+shrunkenLFC_dds_results_obj<-lfcShrink(
+  dds=dds_final_filtered_DE,
+  coef = "cell_type_CD8_vs_CD4",
+  res= res,
+  type = "apeglm",
+  lfcThreshold = 0,
+  svalue = FALSE,
+  returnList = FALSE,
+  format = "DataFrame",
+  saveCols = NULL,
+  apeAdapt = TRUE,
+  apeMethod = "nbinomCR",
+  parallel = FALSE,
+  BPPARAM = bpparam(),
+  quiet = FALSE,
+)
+shrunkenLFC_dds_results_obj
+summary(shrunkenLFC_dds_results_obj) 
 
 # call your results table  called shrunkenLFC_dds_results_obj
 
@@ -464,11 +530,12 @@ Table should contain log2 fold changes and p-values for all genes
 ```{r}
 
 # convert shrunkenLFC_dds_results_obj to a dataframe and call it shrunkenLFC_dds_results_df
-
+shrunkenLFC_dds_results_df<-data.frame(shrunkenLFC_dds_results_obj)
+shrunkenLFC_dds_results_df
 # Use the org.Mm.eg.db package to get gene symbols for the ensembl gene ids (hint:you did this on bioconductor day) 
-
+gene_symbols<-mapIds(x=org.Mm.eg.db, keys = rownames(shrunkenLFC_dds_results_df), column = "SYMBOL", keytype = "ENSEMBL")
+gene_symbols
 # How many Ensembl IDs are not assigned an gene symbol and how many gene symbols are duplicated?
-
 
 
 keytypes(org.Mm.eg.db)      #to remind us of what keytypes are in this particular db
@@ -476,6 +543,8 @@ keytypes(org.Mm.eg.db)      #to remind us of what keytypes are in this particula
 # use mapIds() to get 1:1 mapping for SYMBOL, ENTREZ and MGI
 
 # add mapId vectors to  shrunkenLFC_dds_results_df
+shrunkenLFC_dds_results_df$gene_symbol<-gene_symbols
+shrunkenLFC_dds_results_df
 ```
 
 
@@ -484,9 +553,9 @@ keytypes(org.Mm.eg.db)      #to remind us of what keytypes are in this particula
 ```{r}
 
 # first change covert ensembl_ids to a column 
-shrunkenLFC_dds_results_df <- results_shrunken_LFC_apeglm_filtered_df %>% 
+shrunkenLFC_dds_results_df <- shrunkenLFC_dds_results_df %>% 
 						rownames_to_column("ensembl_gene_ids")
-
+shrunkenLFC_dds_results_df
 # Save results to file 
 write_csv(shrunkenLFC_dds_results_df, "CD8_vs_CD4_DE_results_lfcshrinkage_allgenes.csv")
 ```

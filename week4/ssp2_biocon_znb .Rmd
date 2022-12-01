@@ -1,0 +1,628 @@
+---
+title: "ssp_biocon_znb"
+author: "Zedias Chikwambi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+####Step 1 -Installation of packages
+```{r}
+#installing code
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("BUSpaRse")
+
+```
+
+
+###Step 2 - Loading of packages
+```{r message=FALSE}
+
+library(patchwork)
+library(tidyverse)
+library(batchelor)
+library(harmony)
+library(cowplot)
+library(lisi)
+library(MAST)
+library(DropletUtils)
+library(SummarizedExperiment)
+library(DelayedMatrixStats)
+library(uwot)
+library(Rtsne)
+library(scran)
+library(iSEE)
+library("BUSpaRse") #if cell ranger was not used to process the counts use this.
+library(biomaRt)
+library(scuttle)
+library(biomaRt)
+library(Seurat)
+```
+
+# Step 3 - import data and assign to object
+```{r}
+ssp2 <- BUSpaRse::read_count_output("/Users/chinhoyiuniversity/OBDS_training/week4/genecount2/", name = "genes", tcc = FALSE)
+dim(ssp2)
+
+```
+
+```{r}
+
+sample2<-rep("ssp2", times = length(colnames(ssp2)))
+ssp2_sce<- SingleCellExperiment(
+    list(
+        counts = ssp2),
+        metadata = list(Sample = "ssp2"),
+                     colData= DataFrame(Sample = sample2))
+ssp2_sce
+ssp2_sce@metadata
+colData(ssp2_sce)
+
+```
+
+## Quality control
+
+- Compute and visualise quality control metrics (library size, genes detected, mitochondrial fraction); use `scuttle` and/or `scater`.
+
+First make a df to map ensemblIDs with gene symbol
+
+```{r}
+
+mapping <- read.table("~/OBDS_training/week4/genecount/hgnc_list.txt")
+
+ensembl <- rownames(as.data.frame(rowData(ssp2_sce)))
+
+hgnc_df <- data.frame("ensembl_gene_id" = ensembl)
+# Match the Ensembl gene ids from the Seurat object to the mappings from Biomart (returns positions of matches)
+positions <- match(hgnc_df$ensembl_gene_id, mapping$EnsName)
+# Add the HGNC symbol for each gene to the hgnc dataframe
+hgnc_df$hgnc_symbol <- mapping$hgnc_symbols[positions]
+
+missing <- which(is.na(hgnc_df$hgnc_symbol) | trimws(hgnc_df$hgnc_symbol) == "")
+hgnc_df$hgnc_symbol[missing] <- hgnc_df$ensembl_gene_id[missing]
+dups = which(duplicated(hgnc_df$hgnc_symbol))
+hgnc_df[dups,]
+hgnc_df$hgnc_symbol[dups] <- hgnc_df$ensembl_gene_id[dups]
+
+rownames(ssp2) <- hgnc_df$hgnc_symbol
+
+ssp2_sce <- SingleCellExperiment(list(counts = ssp2),
+                            metadata = list(Sample = "ssp2"),
+                            colData = DataFrame(Sample =sample2))
+colData(ssp2_sce)
+dim(ssp2_sce)
+```
+
+Save the hgnc_list table for future use
+
+
+```{r}
+write.table(hgnc_df, "hgnc_list_bioconductor.txt", sep = "\t")
+```
+
+Add gene IDs and symbols to the sce
+
+```{r}
+
+rowData(ssp2_sce)$ID <- hgnc_df$ensembl_gene_id
+rowData(ssp2_sce)$Symbol <- hgnc_df$hgnc_symbol
+rowData(ssp2_sce)
+
+```
+
+
+
+Identify the mitochondrial genes
+
+```{r}
+mito <- hgnc_df[grep("^MT-", hgnc_df$hgnc_symbol),]
+table(mito)
+```
+
+
+Add QC to the colData using scuttle::addPerCellQC
+
+```{r}
+
+ssp2_sce <- scuttle::addPerCellQC(ssp2_sce, percent_top = 50, subsets = list(MT=mito$hgnc_symbol))
+
+colData(ssp2_sce)
+
+```
+
+
+
+#Quality control.
+
+####Step1: Adding Ensembl gene IDs
+
+```{r}
+#library(EnsDb.Hsapiens.v86)
+#library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+```
+
+## Visualising library size, genes detected and mitochondrial fraction as three violin plots; using `ggplot2 ###
+
+
+```{r}
+# plot the violin graph of the unfiltered object.
+plot2x <- colData(ssp2_sce)%>%
+    as_tibble()%>%  
+    ggplot() +
+    geom_violin(aes(Sample, sum )) +
+    labs(x = "Total UMI", y = "Value")
+plot2x2 <- colData(ssp2_sce) %>%
+    as_tibble() %>% 
+    ggplot() +
+    geom_violin(aes(Sample, detected)) +
+    labs(x = "Genes detected", y = "Value")
+plot2x3 <- colData(ssp2_sce ) %>%
+    as_tibble() %>% 
+    ggplot() +
+    geom_violin(aes(Sample, subsets_MT_percent)) +
+    labs(x = "Percentage mitochondrial", y = "Value")
+
+cowplot::plot_grid(plot2x, plot2x2, plot2x3, nrow = 2) # combine the graphs into a single graph using cowplot:: plot_grid function.
+```
+
+```{r}
+### Filter the attributes according to sum, MT_percent and the genes detected
+## Here you can play around with the filtering parameters and only return those optimised.
+
+ssp2_sce_filtered <- ssp2_sce[ ,ssp2_sce$sum > 20 & ssp2_sce$subsets_MT_percent < 10 & ssp2_sce$detected >1500 ]
+head(ssp2_sce_filtered)
+colData(ssp2_sce_filtered)
+dim(ssp2_sce_filtered)
+```
+
+
+```{r}
+# plot the violin graphs to show the distribution of the features.
+plot2_1 <- colData(ssp2_sce_filtered)%>%
+    as_tibble()%>%  
+    ggplot() +
+    geom_violin(aes(Sample, sum )) +
+    labs(x = "Total UMI", y = "Value")
+
+```
+
+
+```{r}
+plot2_2 <- colData(ssp2_sce_filtered ) %>%
+    as_tibble() %>% 
+    ggplot() +
+    geom_violin(aes(Sample, detected)) +
+    labs(x = "Genes detected", y = "Value")
+```
+
+```{r}
+plot2_3 <- colData(ssp2_sce_filtered ) %>%
+    as_tibble() %>% 
+    ggplot() +
+    geom_violin(aes(Sample, subsets_MT_percent)) +
+    labs(x = "Percentage mitochondrial", y = "Value")
+
+cowplot::plot_grid(plot2_1, plot2_2, plot2_3, nrow = 1) # collet the graphs into a single graph using cowplot:: plot_grid function.
+```
+
+
+
+```{r}
+ssp2_sce_filtered <- scuttle::addPerFeatureQC(ssp2_sce_filtered
+                                   )
+rowData(ssp2_sce_filtered)                                 
+dim(ssp2_sce_filtered)
+```
+
+```{r}
+## ggplot2
+
+rawdata2_2<- rowData(ssp2_sce_filtered) %>%
+    as_tibble() %>%
+    ggplot() +
+    geom_point(aes(detected / 100 * ncol(ssp2_sce_filtered), log10(mean)))
+rawdata2_2
+
+
+```
+
+
+```{r}
+library(scuttle)
+#Normalise the filtered object with scuttle::logNormCount
+
+ssp2_sce <- scuttle::logNormCounts(ssp2_sce_filtered) 
+# Check if the logcounts assay has been added
+assayNames(ssp2_sce)
+colData(ssp2_sce)
+
+```
+
+```{r}
+## Plot counts ##
+#### - Plot the variance against the mean of each gene.
+library(DelayedMatrixStats)
+#
+x_2 <- DelayedArray(assay(ssp2_sce, "counts"))
+plot_data_2 <- tibble(
+    mean = DelayedMatrixStats::rowMeans2(x_2),
+    variance = DelayedMatrixStats::rowVars(x_2)
+)
+plot_counts_2 <- ggplot(plot_data_2, aes(mean, variance)   ) +
+    geom_point()
+#
+x2 <- DelayedArray(assay(ssp2_sce, "logcounts"))
+plot_data2 <- tibble(
+    mean = DelayedMatrixStats::rowMeans2(x2),
+    variance = DelayedMatrixStats::rowVars(x2)
+)
+plot_logcounts2 <- ggplot(plot_data2, aes(mean, variance)   ) +
+    geom_point()
+cowplot::plot_grid(plot_counts_2, plot_logcounts2, nrow = 1, labels = c("Counts", "LogCounts"))
+```
+
+
+**Note:** how can you tell whether the normalisation was effective?
+  Compare with https://osca.bioconductor.org/feature-selection.html#quantifying-per-gene-variation
+
+
+
+## Feature selection
+
+Select features for downstream analyses, e.g. highly variable genes; use `scran`.
+
+- Use `scran::modelGeneVar()` to model the variance of the log-expression profiles for each gene.
+  What is the output?
+
+```{r}
+library(scran)
+ssp2_hvg <- scran::modelGeneVar(ssp2_sce)
+ssp2_hvg
+```
+
+
+```{r}
+##  Visualise the relation between the mean expression of each gene and the total / biological / technical variance of each gene.
+ggplot(as_tibble(ssp2_hvg)) +
+    geom_point(aes(mean, total), color = "black") +
+    geom_point(aes(mean, bio), color = "blue") +
+    geom_point(aes(mean, tech), color = "red")
+```
+```{r}
+
+#- Use `scran::getTopHVGs()` to identify highly variable genes (e.g., top 10%).
+hvg3 <- scran::getTopHVGs(
+  ssp2_hvg,
+  var.field = "bio",
+  n = NULL,
+  #prop = 0.1,
+  var.threshold = 0.5,
+  fdr.field = "FDR",
+  fdr.threshold = 0.05,
+  row.names = !is.null(rownames(ssp2_hvg))
+)
+
+length(hvg3)
+head(hvg3)
+```
+
+```{r}
+
+
+```
+
+```{r}
+## ggplot2
+ssp2_hvg %>%
+    as_tibble() %>%
+    mutate(
+        gene_id = rownames(ssp2_hvg),
+        hvg3 = gene_id %in% hvg3
+    ) %>%
+    ggplot() +
+    geom_point(aes(mean, bio, color = hvg3))
+
+
+
+
+```
+
+
+```{r}
+#- Use `scran::getTopHVGs()` to identify highly variable genes (e.g., top 10%).
+
+hvg2 <- scran::getTopHVGs(ssp2_hvg, prop = 0.1)
+length(hvg2)
+head(hvg2)
+```
+
+
+
+```{r}
+## ggplot2
+ssp2_hvg %>%
+    as_tibble() %>%
+    mutate(
+        gene_id = rownames(ssp2_hvg),
+        hvg2 = gene_id %in% hvg2
+    ) %>%
+    ggplot() +
+    geom_point(aes(mean, bio, color = hvg2))
+
+
+
+
+```
+
+## Dimensionality reduction
+  Set a seed to control reproducibility.
+**Note:** only give the set of highly variable genes to the `scater::runPCA()` function, to save time, memory, and to focus on biologically informative genes in the data set.
+
+```{r}
+set.seed(1010)
+ssp2_sce <- scater::runPCA(ssp2_sce, subset_row = hvg2 )
+reducedDimNames(ssp2_sce)
+dim(ssp2_sce)
+
+```
+
+- Apply UMAP and t-SNE successively on the output of the PCA.
+  List the names of dimensionality reduction results available each time.
+
+```{r}
+ssp2_sce <- scater::runUMAP(ssp2_sce,  dimred="PCA",  external_neighbors = T)
+reducedDimNames(ssp2_sce)
+```
+
+```{r}
+ssp2_sce <- scater::runTSNE(ssp2_sce, dimred="PCA",  external_neighbors = T)
+reducedDimNames(ssp2_sce)
+
+```
+
+
+  
+  
+
+```{r}
+####  Visualise the scatterplot of cells produced by each dimensionality reduction method.##########
+
+ssp2_pca <- scater::plotReducedDim(ssp2_sce, dimred = "PCA", colour_by = "subsets_MT_percent")
+ssp2_pca
+```
+
+```{r}
+ssp2_umap <- scater::plotReducedDim(ssp2_sce, dimred = "UMAP", colour_by = "subsets_MT_percent") 
+ssp2_umap
+```
+
+```{r}
+ssp2_tSNE <- scater::plotReducedDim(ssp2_sce, dimred = "TSNE", colour_by = "subsets_MT_percent") 
+              
+ssp2_tSNE
+```
+
+```{r}
+cowplot::plot_grid(ssp2_pca, 
+                       ssp2_umap, 
+                       ssp2_tSNE, 
+                       nrow = 2, 
+                       labels = c("PCA", "UMAP", "TSNE"))
+
+```
+
+  
+```{r}
+## Denoising expression with PCAs
+### Denoise log-expression data by removing principal components corresponding to technical noise.
+ssp2_denoise <- scran::denoisePCA(ssp2_sce, ssp2_hvg, subset.row = hvg)
+ncol(reducedDim(ssp2_denoise, "PCA"))
+reducedDimNames(ssp2_denoise)
+```
+
+
+```{r}
+
+ssp2_denoise<-scater::runUMAP(ssp2_denoise, dimred = "PCA",  external_neighbors = TRUE)
+reducedDimNames(ssp2_denoise)
+```
+
+
+
+
+- Use `scran::denoisePCA()` to remove principal components that correspond to technical noise, and compare downstream t-SNE or UMAP with those obtained before de-noising.
+  Name the output `sce_denoise`.
+  How many components remain after denoising?
+  5
+  Visualise a UMAP of the denoised PCA and compare.
+
+
+```{r}
+###### Plotting the effect  of denoising  for each reduction method 
+
+
+ssp2_denoise_umap <- scater::plotReducedDim(ssp2_denoise, dimred = "UMAP", colour_by = "subsets_MT_percent") 
+
+
+plot_grid(
+    ssp2_umap + theme(legend.position = "bottom"),
+    ssp2_denoise_umap + theme(legend.position = "bottom"),
+    nrow = 1, labels = c("ssp2_umap", "ssp2_denoise_umap"))
+
+```
+
+
+## Clustering
+
+Cluster cells using `scran`.
+
+- Start with `scran::getClusteredPCs()` to cluster cells after using varying number of PCs, and pick the number of PCs using a heuristic based on the number of clusters.
+
+```{r}
+
+output2 <- scran::getClusteredPCs(reducedDim(ssp2_denoise, "PCA"))
+
+head(output2)
+metadata(output2)$chosen
+```
+
+
+- Use `scran::buildSNNGraph()` and `igraph::cluster_louvain()` with that "ideal" number of PCs.
+  Assign the cluster label to a cell metadata column named `"label"`.
+
+```{r, message=FALSE}
+g2 <- scran::buildSNNGraph(t(reducedDim(ssp2_denoise, "PCA")), d = metadata(output2)$chosen)
+colData(ssp2_denoise)[["label"]] <- factor(igraph::cluster_louvain(g2)$membership)
+colData(ssp2_denoise)
+```
+
+- Visualise the assigned cluster on your preferred dimensionality reduction layout.
+
+**Note:** Dimensionality reduction and clustering are two separate methods both based on the PCA coordinates.
+  They may not always agree with each other, often helping to diagnose over- or under-clustering, as well as parameterisation of dimensionality reduction methods.
+
+```{r}
+ssp2_clus1 <- reducedDim(x = ssp2_sce, type = "UMAP") %>%
+    as.data.frame() %>%
+    as_tibble() %>%
+    bind_cols(colData(ssp2_sce) %>% as_tibble()) %>%
+    sample_frac() %>%
+    ggplot() +
+    geom_point(aes(V1, V2, color=label)) +
+    cowplot::theme_cowplot()
+
+```
+
+
+
+```{r}
+ssp2_clus <- reducedDim(x = ssp2_denoise, type = "UMAP") %>%
+    as.data.frame() %>%
+    as_tibble() %>%
+    bind_cols(colData(ssp2_denoise) %>% as_tibble()) %>%
+    sample_frac() %>%
+    ggplot() +
+    geom_point(aes(V1, V2, color=label)) +
+    cowplot::theme_cowplot()
+
+plot_grid(
+    ssp2_umap + theme(legend.position = "bottom"),
+    ssp2_clus + theme(legend.position = "bottom"),
+    nrow = 1, labels = c("ssp2_clus1", "ssp2_clus"))
+
+```
+
+
+```{r}
+
+scater::plotReducedDim(ssp2_denoise, dimred = "UMAP", colour_by = "label")
+```
+
+
+## Bonus point
+
+- Test different numbers of principal components and compare results.
+
+```{r, message=FALSE}
+snn_plots2 <- list()
+for (d in c(5, 10, 13, 15)) {
+    g3 <- scran::buildSNNGraph(t(reducedDim(ssp2_denoise, "PCA")), d = d)
+    colData(ssp2_denoise)[[sprintf("snn_d", d)]] <- factor(igraph::cluster_louvain(g3)$membership)
+    gg_d2 <- reducedDim(x = ssp2_denoise, type = "UMAP") %>%
+        as.data.frame() %>%
+        as_tibble() %>%
+        bind_cols(colData(ssp2_denoise) %>% as_tibble()) %>%
+        sample_frac() %>%
+        ggplot() +
+        geom_point(aes(V1, V2, color=snn_d)) +
+        labs(title = d) +
+        cowplot::theme_cowplot()
+    snn_plots2[[as.character(d)]] <- gg_d2
+}
+plot_grid(plotlist = snn_plots2, ncol = 2)
+```
+
+## Cluster markers
+
+- Use `scran::findMarkers()` to identify markers for each cluster.
+  Display the metadata of markers for the first cluster.
+
+```{r}
+markers2 <- scran::findMarkers(ssp2_denoise, ssp2_denoise$label)
+head(markers2)
+rowData(ssp2_denoise)[rownames(markers2[[1]]), ] %>% 
+    as.data.frame() %>% 
+    head() 
+
+```
+
+- Visualise the expression of selected markers:
+
+  + As a dot plot, optionally with a violin layer.
+
+```{r}
+marker_id2 <- rownames(markers2$`1`)[1]
+marker_id2 <- "TMEM132C"
+marker_name2 <- rowData(ssp2_denoise)[marker_id2, "Symbol"]
+colData(ssp2_denoise) %>%
+    as_tibble() %>%
+    mutate(marker = assay(ssp2_denoise, "logcounts")[marker_id2, ]) %>%
+    ggplot(aes(label, marker)) +
+    geom_violin(aes(fill = label)) +
+    geom_point() +
+    labs(title = marker_id2, subtitle = marker_name2) +
+    scale_color_viridis_c() + theme_bw()
+
+
+
+
+
+
+
+```
+
+  + On a dimensionality reduction layout.
+    Compare with the cluster labels.
+
+```{r}
+
+gg_marker2 <- reducedDim(x = ssp2_denoise, type = "UMAP") %>%
+    as.data.frame() %>%
+    as_tibble() %>%
+    mutate(marker = assay(ssp2_denoise, "logcounts")[marker_id2, ]) %>%
+    ggplot() +
+    geom_point(aes(V1, V2, color=marker)) +
+    scale_color_viridis_c() +
+    labs(title = marker_id2, subtitle = marker_name2) +
+    cowplot::theme_cowplot()
+plot_grid(gg_marker2, ssp2_clus)
+
+
+```
+
+```{r}
+
+### Heatmap expression profile for [1:5] top markers
+library(scater)
+plotHeatmap(ssp2_denoise, features = rownames(markers2$`1`)[1:12])
+```
+
+```{r}
+
+```
+
+
+

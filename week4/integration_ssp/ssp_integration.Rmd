@@ -1,0 +1,252 @@
+---
+title: "Supersplinatus integration"
+author: "Carla Cohen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Integration of two ssp samples.
+
+Load the required packages
+
+```{r, messages = FALSE}
+library(Seurat)
+library(SeuratData)
+library(SeuratWrappers)
+library(patchwork)
+library(tidyverse)
+library(batchelor)
+library(harmony)
+library(lisi)
+library(MAST)
+library(cowplot)
+options(future.globals.maxSize = 4000 * 1024^2)    # Maximum allowed total size (in bytes) of global variables identified
+```
+
+## Set up
+
+Import the RDS files created already. 
+These objects have been through the QC and filtering steps but do not contain any normalisation or clustering. 
+
+```{r}
+ssp_1 <- readRDS("/Users/davidsims/obds/R/aibst/analysis/ssp_1/RDS_objects.dir/ssp-1_after_qc.rds")
+ssp_2 <- readRDS("/Users/davidsims/obds/R/aibst/analysis/ssp_2/RDS_objects.dir/ssp-2_after_qc.rds")
+```
+
+Compare the QC metrics
+
+
+```{r}
+p1 <- VlnPlot(ssp_1, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"))
+p2 <- VlnPlot(ssp_2, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"))
+plot_grid(p1, p2, ncol = 1)
+```
+
+## Look at merged data
+
+First create a merged object to see how the objects compare
+
+```{r}
+ssp_merged <- merge(x = ssp_1,y = ssp_2,
+                       add.cell.ids = c("ssp_1", "ssp_2"))
+```
+
+Perform SCTransform
+
+```{r, message = FALSE, warning = FALSE}
+ssp_merged <- SCTransform(object = ssp_merged,
+                             vars.to.regress = "percent_mt")
+```
+
+Plot the QC metrics again
+
+```{r}
+VlnPlot(ssp_merged, features = c("nCount_RNA","nCount_SCT"), pt.size = 0, same.y.lims = T, group.by = "orig.ident")
+```
+
+Plot the variable feature plot
+
+```{r, fig.width=8}
+plot1 <- VariableFeaturePlot(ssp_merged,selection.method = "sct")
+top10 <- VariableFeatures(ssp_merged)[1:10]
+plot2 <- LabelPoints(plot = plot1, 
+                     points = top10, 
+                     repel = TRUE)
+plot2
+```
+
+Perform and plot PCA
+
+```{r}
+ssp_merged <- RunPCA(ssp_merged)
+ElbowPlot(ssp_merged, ndims = 50)
+```
+
+Run UMAP and visualise
+
+```{r}
+ssp_merged <- RunUMAP(ssp_merged, dims = 1:50)
+DimPlot(ssp_merged, group.by = "orig.ident")
+```
+
+## Integration with Seurat
+
+Generate a named list of the two objects to run workflow
+
+```{r}
+ssp.list <- list("ssp_1" = ssp_1, "ssp_2" = ssp_2)
+ssp.list
+```
+
+Apply SCTransform across the list, select integration features and prep SCT integration
+```{r}
+
+#this applies the function to each object in the list independently. 
+#this is different to above where we ran the SCTransform on the merged data, so it was performed on all the data at once.
+ssp.list <- lapply(ssp.list, SCTransform, variable.features.n=3000, vars.to.regress = "percent_mt") 
+features <- SelectIntegrationFeatures(ssp.list, nfeatures = 3000)
+ssp.list <- PrepSCTIntegration(object.list = ssp.list, 
+                                anchor.features = features)
+
+```
+
+Find integration anchors and perform integration
+
+```{r}
+ssp.anchors <- FindIntegrationAnchors(ssp.list,
+                                       anchor.features = features,
+                                       normalization.method = "SCT",
+                                       reduction = "cca", #default
+                                       dims = 1:50) #same as merge so that we can compare outputs
+
+ssp.integrated <- IntegrateData(ssp.anchors,
+                                   dims = 1:50,
+                                   normalization.method = "SCT")
+```
+Run PCA on integrated data
+
+```{r}
+ssp.integrated <- RunPCA(ssp.integrated, npcs = 50)
+ElbowPlot(ssp.integrated, ndims = 50)
+```
+
+Visualise PCA, how does this compare to the merged data?
+
+```{r}
+DimPlot(ssp.integrated)
+DimPlot(ssp_merged, reduction = "pca")
+```
+
+
+Run UMAP, Find Neighbours, Find Clusters
+```{r}
+ssp.integrated <- RunUMAP(ssp.integrated, dims = 1:30)
+ssp.integrated <- FindNeighbors(ssp.integrated, dims = 1:30)
+```
+> various algorithms are available, louvain is the default but you can try the others to get a more fine-scale clustering e.g. leiden
+
+Test various clustering resolutions
+
+```{r}
+ssp.integrated_res0.2 <- FindClusters(ssp.integrated, resolution = 0.2)
+ssp.integrated_res0.5 <- FindClusters(ssp.integrated, resolution = 0.5)
+ssp.integrated_res0.8 <- FindClusters(ssp.integrated, resolution = 0.8)
+ssp.integrated_res1.0 <- FindClusters(ssp.integrated, resolution = 1.0)
+```
+Plot the different resolutions
+
+```{r}
+plot_res0.2 <- UMAPPlot(ssp.integrated_res0.2)
+plot_res0.5 <- UMAPPlot(ssp.integrated_res0.5)
+plot_res0.8 <- UMAPPlot(ssp.integrated_res0.8)
+plot_res1.0 <- UMAPPlot(ssp.integrated_res1.0)
+plot_grid(plot_res0.2, plot_res0.5, plot_res0.8, plot_res1.0, labels = c("0.2", "0.5", "0.8", "1.0"))
+```
+
+```{r}
+ssp.integrated <- FindClusters(ssp.integrated, resolution = 0.2)
+```
+
+
+Plot
+```{r}
+DimPlot(ssp.integrated)
+DimPlot(ssp.integrated, group.by = "orig.ident")
+```
+
+Find markers
+
+```{r}
+DefaultAssay(ssp.integrated) <- "RNA"
+
+ssp.integrated.markers.LR <- FindAllMarkers(ssp.integrated, method = "LR", 
+                                  latent.vars = "orig.ident", 
+                                  only.pos = TRUE)
+```
+
+Get the top 5 markers for each cluster
+
+```{r}
+ssp.integrated.markers.top5 <- ssp.integrated.markers.LR %>% 
+    group_by(cluster) %>% 
+    slice_max(order_by = avg_log2FC, n = 5)
+head(ssp.integrated.markers.top5)
+```
+
+Plot heatmap
+
+```{r}
+DefaultAssay(ssp.integrated) <- "SCT"
+DoHeatmap(ssp.integrated,
+          features = ssp.integrated.markers.top5$gene)
+```
+Dotplot
+
+```{r}
+#get list of genes for first cluster
+group0 <- ssp.integrated.markers.LR %>% 
+    group_by(cluster) %>% 
+    slice_max(order_by = avg_log2FC, n = 10) %>% 
+    filter (cluster == "0")
+
+DotPlot(ssp.integrated,
+        features = unique(group0$gene)) +
+        ggtitle("cluster 0") + 
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Key markers:
+
+TNNT2+ TRDN+ cells: "TRDN", "DES", "TNNT3", "MYH1", 
+FBLN fibroblasts: "COL1A2", "COL3A1", "DCN", "NEGR1", "FBLN1", 
+TNNT1+ TRDN+ cells: "TNNT1", "ATP2A2", "MYH7", 
+MKX+ fibroblasts: "PIEZO2", "COL12A1", "MKX", 
+COL22A1+ TRDN cells: "COL22A1", "CPM", "SORBS2", 
+Vascular endothelium: "PECAM1", "PTPRB", "FLT1", "VWF", 
+Satellite cells: "PAX7", "CALCR", "GREM1", 
+Mural cells: "NOTCH3", "PDGFRB", "MYO1B", 
+Lymphatic endothelium: "MMRN1", "PROX1", "KDR", "FLT4", 
+Smooth muscle cells: "MYH11", "NTRK3", "ITGA8", 
+Adipocytes: "GPAM", "AQP7", "ADIPOQ", 
+Immune cells: "PTPRC", "CD247", "CD69", "BLNK", "CD163", "MSR1"
+
+
+```{r}
+geneName <- c("TRDN", "DES", "TNNT3", "MYH1", "COL1A2", "COL3A1", "DCN", "NEGR1", "FBLN1", "TNNT1", "ATP2A2", "MYH7", "PIEZO2", "COL12A1", "MKX", "COL22A1", "CPM", "SORBS2", "PECAM1", "PTPRB", "FLT1", "VWF", "PAX7", "CALCR", "GREM1", "NOTCH3", "PDGFRB", "MYO1B", "MMRN1", "PROX1", "KDR", "FLT4", "MYH11", "NTRK3", "ITGA8", "GPAM", "AQP7", "ADIPOQ", "PTPRC", "CD247", "CD69", "BLNK", "CD163", "MSR1")
+
+DotPlot(ssp_merged, features = geneName, cols = c("blue", "red")) + 
+    scale_x_discrete(breaks=geneName, labels=geneName) + 
+    ggtitle("Top markers") + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Save the Seurat objects
+
+```{r}
+saveRDS(ssp.integrated, "RDS_objects.dir/ssp_seurat_integrated.rds")
+```
+
